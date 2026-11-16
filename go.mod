@@ -69,8 +69,8 @@ tool (
 	golang.org/x/mobile/cmd/gobind
 )
 
-replace github.com/gcash/bchd => github.com/CyberAshven/bchd v0.22.1-0.20261116153357-fef55d3b451f
+replace github.com/gcash/bchd => github.com/CyberAshven/bchd v0.22.1-0.20261116162037-82c32f022ad5
 
 replace github.com/gcash/bchutil => github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1
 
-replace github.com/gcash/neutrino => github.com/CyberAshven/neutrino v0.0.0-20261116153718-0be09bc186f6
+replace github.com/gcash/neutrino => github.com/CyberAshven/neutrino v0.0.0-20261116162212-6afbdd06f5e6
