@@ -1,9 +1,9 @@
-github.com/CyberAshven/bchd v0.22.1-0.20261112184203-9289d8b233ad h1:ZlMyuWwB83o6442J8/Ks1Irsmv48WOpPs+OMxZTjGos=
-github.com/CyberAshven/bchd v0.22.1-0.20261112184203-9289d8b233ad/go.mod h1:yb9LMvn9MQj/+unpWvF27Qih+TwMPDHha9fzB2mR4Nw=
-github.com/CyberAshven/bchutil v0.0.0-20261112073614-58259c11508c h1:+a4lXFCYTz0CRheBUz/nCJMadUvecQO/zEstLLrlVYc=
-github.com/CyberAshven/bchutil v0.0.0-20261112073614-58259c11508c/go.mod h1:PUl4oVSi94FsHVSOFdAaYG0iFOEG2xrXjet1EEqOSss=
-github.com/CyberAshven/neutrino v0.0.0-20261112184430-7181d56dc311 h1:7Q4fVTumJ/9Rz91vdhEjJWCgHFVKPWP24SgXj7TlVdQ=
-github.com/CyberAshven/neutrino v0.0.0-20261112184430-7181d56dc311/go.mod h1:pEDUEaZq7ifUu7iF6WwNneSYK2KoD55nR22Gj9E5pd8=
+github.com/CyberAshven/bchd v0.22.1-0.20261116153357-fef55d3b451f h1:RR0nS/8eCFJ3LY1dVAV8Jxu3o6JOVyJbXvBKjX1geYs=
+github.com/CyberAshven/bchd v0.22.1-0.20261116153357-fef55d3b451f/go.mod h1:PvouYoTl7fnsuVWCVslqWDTy0M8DDZdZ+bIZzIJAmuA=
+github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1 h1:CJIHXYyqrbmxgdTjTa01ylN548h/zuMYmUWIzyA1ydQ=
+github.com/CyberAshven/bchutil v0.0.0-20261116153250-c6eb297ab5c1/go.mod h1:PUl4oVSi94FsHVSOFdAaYG0iFOEG2xrXjet1EEqOSss=
+github.com/CyberAshven/neutrino v0.0.0-20261116153718-0be09bc186f6 h1:91OtMBJnedXpXj+tU6DdEQENrk9HXXDkiF6w6Wbm6rI=
+github.com/CyberAshven/neutrino v0.0.0-20261116153718-0be09bc186f6/go.mod h1:+VRQDOWDSAeWTTGuqWNohwb0PQ5ZpLL9LLRWQrQhf2Y=
 github.com/aead/siphash v1.0.1 h1:FwHfE/T45KPKYuuSAKyyvE+oPWcaQ+CUmFW0bPlM+kg=
 github.com/aead/siphash v1.0.1/go.mod h1:Nywa3cDsYNNK3gaciGTWPwHt0wlpNV15vwmswBAUSII=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=
