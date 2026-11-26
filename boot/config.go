@@ -83,16 +83,16 @@ type config struct {
 	ProxyPass        string                  `long:"proxypass" default-mask:"-" description:"Password for proxy server"`
 
 	// SPV client options
-	UseSPV         bool          `long:"usespv" description:"Enables the experimental use of SPV rather than RPC for chain synchronization"`
-	BlocksOnly     bool          `long:"blocksonly" description:"Disables downloading unconfirmed transaction when in SPV mode"`
-	PersistFilters bool          `long:"persistfilters" description:"Saves downloaded compact filters to disk when in SPV mode so they aren't fetched again after a restart"`
-	ScriptFilters  bool          `long:"scriptfilters" description:"Syncs script filters (filter type 1) rather than regular ones when in SPV mode, from the peers that serve them, so that only the wallet's own scripts are matched and not each coin it holds."`
-	MempoolFloor   uint32        `long:"mempoolfetchfloor" description:"With --scriptfilters, download every interval of unconfirmed transactions that holds fewer transactions than this, as a wallet on regular filters downloads every transaction, and a larger one only when its filter matches the wallet. A larger value hides more and downloads more. 0 takes the default of 200."`
-	AddPeers       []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
-	ConnectPeers   []string      `long:"connect" description:"Connect only to the specified peers at startup"`
-	MaxPeers       int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
-	BanDuration    time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
-	BanThreshold   uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers."`
+	UseSPV            bool          `long:"usespv" description:"Enables the experimental use of SPV rather than RPC for chain synchronization"`
+	BlocksOnly        bool          `long:"blocksonly" description:"Disables downloading unconfirmed transaction when in SPV mode"`
+	PersistFilters    bool          `long:"persistfilters" description:"Saves downloaded compact filters to disk when in SPV mode so they aren't fetched again after a restart"`
+	ScriptFilters     bool          `long:"scriptfilters" description:"Syncs script filters (filter type 1) rather than regular ones when in SPV mode, from the peers that serve them, so that only the wallet's own scripts are matched and not each coin it holds."`
+	MempoolFetchFloor uint32        `long:"mempoolfetchfloor" description:"With --scriptfilters, download every interval of unconfirmed transactions that holds fewer transactions than this, as a wallet on regular filters downloads every transaction, and a larger one only when its filter matches the wallet. A larger value hides more and downloads more. 0 takes the default of 200, so the lowest that can be set is 1, which downloads an interval only when its filter matches."`
+	AddPeers          []string      `short:"a" long:"addpeer" description:"Add a peer to connect with at startup"`
+	ConnectPeers      []string      `long:"connect" description:"Connect only to the specified peers at startup"`
+	MaxPeers          int           `long:"maxpeers" description:"Max number of inbound and outbound peers"`
+	BanDuration       time.Duration `long:"banduration" description:"How long to ban misbehaving peers.  Valid time units are {s, m, h}.  Minimum 1 second"`
+	BanThreshold      uint32        `long:"banthreshold" description:"Maximum allowed ban score before disconnecting and banning misbehaving peers."`
 
 	// RPC server options
 	//

@@ -507,7 +507,7 @@ func startNeutrino() (*chain.NeutrinoClient, func(), error) {
 			Database:          spvdb,
 			ChainParams:       *activeNet.Params,
 			FilterType:        filterType,
-			MempoolFetchFloor: cfg.MempoolFloor,
+			MempoolFetchFloor: cfg.MempoolFetchFloor,
 			ConnectPeers:      cfg.ConnectPeers,
 			AddPeers:          cfg.AddPeers,
 			BlocksOnly:        cfg.BlocksOnly,
