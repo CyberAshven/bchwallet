@@ -1,12 +1,16 @@
 package chain
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gcash/bchd/chaincfg"
 	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchutil"
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/neutrino"
 	"github.com/gcash/neutrino/blockntfns"
@@ -169,5 +173,49 @@ func TestRescanSubscribeWaits(t *testing.T) {
 			t.Fatalf("a subscription after a quit gave %v after %d "+
 				"calls, want its refusal after 1", err, source.calls)
 		}
+	}
+}
+
+// TestMempoolAskerMerges checks that the requests for the filter of the whole
+// mempool that come before the gap after the last one ends are merged into one
+// at its end, as a payment can have the wallet take up addresses in several
+// calls, and that a request after a gap without any is asked for at once.
+func TestMempoolAskerMerges(t *testing.T) {
+	var asked [][]bchutil.Address
+	m := &mempoolAsker{gap: time.Hour, ask: func(addrs []bchutil.Address) {
+		asked = append(asked, addrs)
+	}}
+	addrs := make([]bchutil.Address, 4)
+	for i := range addrs {
+		addr, err := bchutil.NewAddressPubKeyHash(
+			bytes.Repeat([]byte{byte(i)}, 20), &chaincfg.SimNetParams,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		addrs[i] = addr
+	}
+
+	m.request(addrs[:1])
+	m.request(addrs[1:2])
+	m.request(addrs[2:3])
+	if !reflect.DeepEqual(asked, [][]bchutil.Address{addrs[:1]}) {
+		t.Fatalf("asked for %v before the gap ended, want only the "+
+			"first request", asked)
+	}
+
+	// The end of the gap, as its timer has it.
+	m.askPending()
+	if !reflect.DeepEqual(asked, [][]bchutil.Address{addrs[:1], addrs[1:3]}) {
+		t.Fatalf("asked for %v at the end of the gap, want the two "+
+			"requests that waited together", asked)
+	}
+
+	// The end of the next gap, which had no request.
+	m.askPending()
+	m.request(addrs[3:])
+	if !reflect.DeepEqual(asked, [][]bchutil.Address{addrs[:1], addrs[1:3], addrs[3:]}) {
+		t.Fatalf("asked for %v, want a request after a gap without "+
+			"any asked for at once", asked)
 	}
 }

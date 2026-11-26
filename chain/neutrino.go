@@ -52,6 +52,10 @@ type NeutrinoClient struct {
 	isRescan   bool
 
 	clientMtx sync.Mutex
+
+	// mempoolAsks merges the requests for the filter of the whole mempool
+	// that NotifyReceived makes on script filters.
+	mempoolAsks *mempoolAsker
 }
 
 // NewNeutrinoClient creates a new NeutrinoClient struct with a backing
@@ -62,6 +66,12 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 	return &NeutrinoClient{
 		CS:          chainService,
 		chainParams: chainParams,
+		mempoolAsks: &mempoolAsker{
+			gap: mempoolRequestGap,
+			ask: func(addrs []bchutil.Address) {
+				chainService.RequestMempoolFilter(addrs, nil)
+			},
+		},
 	}
 }
 
@@ -768,19 +778,74 @@ func (s *NeutrinoClient) NotifyBlocks() error {
 // peer for the filter of its whole mempool again, which also finds a payment
 // that is already waiting.  Nothing is asked for when addrs is empty, or when
 // the service syncs regular filters, whose peers announce every transaction.
+// Requests that come within mempoolRequestGap of the last are merged into one
+// at its end.
 func (s *NeutrinoClient) requestMempoolScripts(addrs []bchutil.Address) {
 	if len(addrs) == 0 || s.CS.FilterType() != wire.GCSFilterScripts {
 		return
 	}
-	s.CS.RequestMempoolFilter(addrs, nil)
+	s.mempoolAsks.request(addrs)
+}
+
+// mempoolRequestGap is how long after the client asked for the filter of the
+// whole mempool it waits before it asks again, so that the addresses that
+// NotifyReceived takes up meanwhile, as one payment can have the wallet take
+// up several, share one request.
+const mempoolRequestGap = time.Second
+
+// mempoolAsker asks for the filter of the whole mempool for the addresses it's
+// given: at once, unless it asked less than gap ago, when the addresses wait,
+// with those of the calls that follow, for one request at the end of the gap.
+type mempoolAsker struct {
+	ask func([]bchutil.Address)
+	gap time.Duration
+
+	// mtx guards timer, which is set while a gap runs, and pending, the
+	// addresses that wait for its end.
+	mtx     sync.Mutex
+	timer   *time.Timer
+	pending []bchutil.Address
+}
+
+// request asks for the filter of the mempool for addrs, or has them wait for
+// the end of the gap.
+func (m *mempoolAsker) request(addrs []bchutil.Address) {
+	m.mtx.Lock()
+	if m.timer != nil {
+		m.pending = append(m.pending, addrs...)
+		m.mtx.Unlock()
+		return
+	}
+	m.timer = time.AfterFunc(m.gap, m.askPending)
+	m.mtx.Unlock()
+	m.ask(addrs)
+}
+
+// askPending asks for the addresses that waited, if any, which starts another
+// gap.
+func (m *mempoolAsker) askPending() {
+	m.mtx.Lock()
+	pending := m.pending
+	m.pending = nil
+	if len(pending) == 0 {
+		m.timer = nil
+		m.mtx.Unlock()
+		return
+	}
+	m.timer = time.AfterFunc(m.gap, m.askPending)
+	m.mtx.Unlock()
+	m.ask(pending)
 }
 
 // NotifyReceived replicates the RPC client's NotifyReceived command.
 func (s *NeutrinoClient) NotifyReceived(addrs []bchutil.Address) error {
-	s.clientMtx.Lock()
-
+	// The mempool is watched for the addresses before it's asked for, and
+	// neither waits for a peer nor needs the client's lock: the chain
+	// service only queues the request for its peers.
 	s.CS.NotifyMempoolReceived(addrs)
 	s.requestMempoolScripts(addrs)
+
+	s.clientMtx.Lock()
 
 	// If we have a rescan running, we just need to add the appropriate
 	// addresses to the watch list.
