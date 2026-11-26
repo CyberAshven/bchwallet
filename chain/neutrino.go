@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -59,6 +62,40 @@ func NewNeutrinoClient(chainParams *chaincfg.Params,
 		CS:          chainService,
 		chainParams: chainParams,
 	}
+}
+
+// filterHeaderFiles names the file neutrino keeps the filter headers of each
+// filter type in, in its data directory.
+var filterHeaderFiles = map[wire.FilterType]string{
+	wire.GCSFilterRegular: "reg_filter_headers.bin",
+	wire.GCSFilterScripts: "script_filter_headers.bin",
+}
+
+// RemoveOtherFilterHeaders removes the filter headers of the filter types
+// other than filterType from a neutrino data directory, before a chain
+// service that syncs filterType opens it.  A chain service rolls back only
+// the filter headers of the type it syncs when a reorg disconnects blocks,
+// while the rollback of the block headers removes those blocks from the index
+// that all header stores share.  The filter headers of another type can then
+// be left with a tip that the index no longer knows, and a chain service that
+// syncs that type later fails to open them.  Once removed, they are synced
+// anew from the genesis block when that type is synced again.
+func RemoveOtherFilterHeaders(dataDir string, filterType wire.FilterType) error {
+	for fType, name := range filterHeaderFiles {
+		if fType == filterType {
+			continue
+		}
+		err := os.Remove(filepath.Join(dataDir, name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		log.Infof("Removed the filter headers of filter type %v, which "+
+			"are synced anew when that type is used again", fType)
+	}
+	return nil
 }
 
 // BackEnd returns the name of the driver.
