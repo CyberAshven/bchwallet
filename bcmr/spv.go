@@ -429,9 +429,13 @@ func searchMissed(from, to int32) int32 {
 // outpoints, each {category, 0}. On regular filters that is a search for those
 // outpoints. On script filters a block filter holds no outpoint, and tokens of
 // a category exist only from its genesis on, so the range is searched upward,
-// whichever way it was given, for the first transaction that creates the
-// category. A transaction that carries the category but is not its genesis is
-// ignored, which is what a range that starts above the genesis sees.
+// whichever way it was given, for the first block that creates an output of
+// the category.  That block holds the genesis if the range does, though it can
+// list a transfer of the category before the genesis, so a transfer has the
+// block read for it.  A block that holds only transfers shows the genesis to
+// be below the range, as a range that starts above it would have it, and the
+// category is searched for no further, rather than in every block that
+// carries it.
 func (b *SPVBackend) searchGenesisSpends(ctx context.Context, outpoints []wire.OutPoint,
 	from, to int32, found func(SpendFound) []wire.OutPoint) (int32, error) {
 
@@ -451,42 +455,69 @@ func (b *SPVBackend) searchGenesisSpends(ctx context.Context, outpoints []wire.O
 		for category := range remaining {
 			categories = append(categories, category)
 		}
-		var resolved bool
+		var settled bool
+		var readErr error
 		height, err := b.source.SearchCategoryOutputs(categories, low, high, func(output OutputFound) bool {
-			var hit []chainhash.Hash
+			var done []chainhash.Hash
 			for category := range remaining {
 				if !carriesCategory(output.Tx, category) {
 					continue
 				}
-				if _, ok := chainbcmr.FindGenesis(output.Tx, category); !ok {
-					continue
+				genesis := output.Tx
+				if _, ok := chainbcmr.FindGenesis(genesis, category); !ok {
+					genesis, readErr = b.blockGenesis(ctx, output.BlockHash, category)
+					if readErr != nil {
+						return false
+					}
 				}
-				hit = append(hit, category)
+				if genesis != nil {
+					found(SpendFound{
+						OutPoint:  wire.OutPoint{Hash: category},
+						Tx:        genesis,
+						Height:    output.Height,
+						BlockHash: output.BlockHash,
+					})
+				}
+				done = append(done, category)
 			}
-			for _, category := range hit {
-				found(SpendFound{
-					OutPoint:  wire.OutPoint{Hash: category},
-					Tx:        output.Tx,
-					Height:    output.Height,
-					BlockHash: output.BlockHash,
-				})
+			for _, category := range done {
 				delete(remaining, category)
 			}
-			resolved = resolved || len(hit) > 0
-			// Stop on this block when it held a genesis, so another category's
-			// genesis in the same block is seen from the start of it.
-			return len(hit) == 0
+			settled = settled || len(done) > 0
+			// Stop on this block when it settled a category, so that the
+			// search goes on without it, and another category's genesis in
+			// the same block is seen from the start of it.
+			return len(done) == 0
 		}, ctx.Done())
+		if readErr != nil {
+			// The block it stopped on wasn't looked at to its end.
+			return height - 1, readErr
+		}
 		if err != nil {
 			return height, err
 		}
 		reached = height
-		if !resolved {
+		if !settled {
 			break
 		}
 		low = height
 	}
 	return reached, nil
+}
+
+// blockGenesis returns the genesis of the category in the block, or nil when
+// the block doesn't hold it.
+func (b *SPVBackend) blockGenesis(ctx context.Context, blockHash, category chainhash.Hash) (*wire.MsgTx, error) {
+	block, err := b.source.GetBlock(&blockHash, ctx.Done())
+	if err != nil {
+		return nil, err
+	}
+	for _, tx := range block.Transactions {
+		if _, ok := chainbcmr.FindGenesis(tx, category); ok {
+			return tx, nil
+		}
+	}
+	return nil, nil
 }
 
 // searchLinkSpends searches for the spends of authchain links. On regular

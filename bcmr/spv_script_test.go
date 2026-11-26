@@ -429,3 +429,73 @@ func TestSPVRegularFiltersUseOutpointSearches(t *testing.T) {
 		t.Fatalf("searches %v, output searches %v", c.searches, c.outputSearches)
 	}
 }
+
+// transferOf returns a transaction that creates an output of the category
+// without being its genesis, as one that sends some of its tokens on does.
+func transferOf(id int64, category chainhash.Hash) *wire.MsgTx {
+	tx := spendOf(id, chainhash.Hash{0x99, byte(id)})
+	tx.AddTxOut(wire.NewTxOut(1, []byte{txscript.OP_TRUE}, wire.TokenData{
+		CategoryID: category, Amount: 5, BitField: wire.HAS_AMOUNT,
+	}))
+	return tx
+}
+
+// TestSPVScriptFiltersGenesisBelowRange ensures that on script filters a search
+// for a genesis over a range that starts above it stops at the first block that
+// creates an output of the category, which holds only transfers, rather than
+// read every block with a transfer, and goes on for the other categories.
+func TestSPVScriptFiltersGenesisBelowRange(t *testing.T) {
+	c := withScriptFilters(newFakeChain(100))
+	below := chainhash.Hash{1}
+	c.put(60, genesisOf(1, below))
+	c.put(70, transferOf(2, below))
+	c.put(80, transferOf(3, below))
+	c.put(90, transferOf(4, below))
+	above := chainhash.Hash{2}
+	aboveGenesis := genesisOf(5, above)
+	c.put(95, aboveGenesis)
+
+	b := NewSPVBackend(c, hintsFor(t, 50))
+	var reported []chainhash.Hash
+	_, err := b.searchGenesisSpends(context.Background(), []wire.OutPoint{{Hash: below}, {Hash: above}}, 65, 100,
+		func(spend SpendFound) []wire.OutPoint {
+			if spend.Tx.TxHash() != aboveGenesis.TxHash() || spend.Height != 95 {
+				t.Errorf("reported %v at %d for %v", spend.Tx.TxHash(), spend.Height, spend.OutPoint.Hash)
+			}
+			reported = append(reported, spend.OutPoint.Hash)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(reported, []chainhash.Hash{above}) {
+		t.Fatalf("reported %v", reported)
+	}
+	if !slices.Equal(categoryLooked[c], []int32{70, 95}) {
+		t.Fatalf("blocks read for categories %v", categoryLooked[c])
+	}
+}
+
+// TestSPVScriptFiltersGenesisAfterTransferInBlock ensures that on script
+// filters a genesis is found in a block that lists a transfer of its category
+// before it.
+func TestSPVScriptFiltersGenesisAfterTransferInBlock(t *testing.T) {
+	c := withScriptFilters(newFakeChain(100))
+	category := chainhash.Hash{1}
+	genesis := genesisOf(1, category)
+	c.put(70, transferOf(2, category), genesis)
+
+	b := NewSPVBackend(c, hintsFor(t, 50))
+	var found []*wire.MsgTx
+	_, err := b.searchGenesisSpends(context.Background(), []wire.OutPoint{{Hash: category}}, 51, 100,
+		func(spend SpendFound) []wire.OutPoint {
+			found = append(found, spend.Tx)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found) != 1 || found[0].TxHash() != genesis.TxHash() {
+		t.Fatalf("found %v, want the genesis %v", found, genesis.TxHash())
+	}
+}
