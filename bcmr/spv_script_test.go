@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"testing"
@@ -438,6 +439,113 @@ func transferOf(id int64, category chainhash.Hash) *wire.MsgTx {
 		CategoryID: category, Amount: 5, BitField: wire.HAS_AMOUNT,
 	}))
 	return tx
+}
+
+// keptScripts returns the transactions whose scripts the backend keeps.
+func keptScripts(b *SPVBackend) []chainhash.Hash {
+	kept := slices.Collect(maps.Keys(b.scripts))
+	slices.SortFunc(kept, func(a, b chainhash.Hash) int { return bytes.Compare(a[:], b[:]) })
+	return kept
+}
+
+// sortedHashes returns the hashes in the order keptScripts gives them.
+func sortedHashes(hashes ...chainhash.Hash) []chainhash.Hash {
+	slices.SortFunc(hashes, func(a, b chainhash.Hash) int { return bytes.Compare(a[:], b[:]) })
+	return hashes
+}
+
+// TestSPVScriptFiltersKeepHeadScriptsOnly ensures that on script filters the
+// backend keeps the script of the head of each token it follows and no other:
+// not the authbase's, nor the head's of a token that burned, isn't followed
+// any more or was forgotten.
+func TestSPVScriptFiltersKeepHeadScriptsOnly(t *testing.T) {
+	c := withScriptFilters(newFakeChain(100))
+	authbase, genesis, published := p2pkhAuthbase(t, 1, true)
+	next := spendOf(3, genesis.TxHash())
+	c.put(75, authbase)
+	c.put(80, genesis)
+	c.put(90, next)
+	burnedCategory := chainhash.Hash{2}
+	burnedGenesis := genesisOf(4, burnedCategory)
+	c.put(60, burnedGenesis)
+	c.put(70, burnOf(burnedGenesis.TxHash()))
+	otherCategory := chainhash.Hash{3}
+	otherGenesis := genesisOf(5, otherCategory)
+	c.put(85, otherGenesis)
+
+	b := NewSPVBackend(c, hintsFor(t, 50))
+	pubState := &State{Category: published}
+	burned := &State{Category: burnedCategory}
+	other := &State{Category: otherCategory}
+	resolve(t, b, pubState, burned, other)
+	if pub := pubState.CurrentPublication(); pub == nil || pub.URIs[0] != "authbase.example" {
+		t.Fatalf("the authbase wasn't read: %+v", pubState)
+	}
+	if !burned.Burned || other.Head() == nil || other.Head().Txid != otherGenesis.TxHash() {
+		t.Fatalf("burned %+v, other %+v", burned, other)
+	}
+	if kept, want := keptScripts(b), sortedHashes(next.TxHash(), otherGenesis.TxHash()); !slices.Equal(kept, want) {
+		t.Fatalf("scripts kept of %v, want those of the heads %v", kept, want)
+	}
+
+	// The next pass that doesn't follow a token lets go of its head.
+	if err := b.Advance(context.Background(), []*State{pubState}, noSave, nil); err != nil {
+		t.Fatal(err)
+	}
+	if kept, want := keptScripts(b), sortedHashes(next.TxHash()); !slices.Equal(kept, want) {
+		t.Fatalf("scripts kept of %v, want that of the head followed %v", kept, want)
+	}
+
+	// Forgetting a token lets go of its head at once.
+	b.Forget(published)
+	if kept := keptScripts(b); len(kept) != 0 {
+		t.Fatalf("scripts kept of %v after the token was forgotten", kept)
+	}
+}
+
+// TestSPVScriptFiltersUnreadableHeadSkipped ensures that on script filters a
+// head whose script can't be read holds up only the token at it: the others
+// move on, and that token is left as it was, to try again at the next pass.
+func TestSPVScriptFiltersUnreadableHeadSkipped(t *testing.T) {
+	c := withScriptFilters(newFakeChain(100))
+	head := spendOf(1, chainhash.Hash{2})
+	next := spendOf(2, head.TxHash())
+	c.put(10, head)
+	c.put(60, next)
+	headBlock, err := c.GetBlockHash(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := &State{
+		Category:    chainhash.Hash{1},
+		Links:       []Link{{Txid: head.TxHash(), Height: 10, BlockHash: *headBlock}},
+		ScannedTo:   10,
+		ScannedHash: *headBlock,
+		Status:      StatusSearching,
+	}
+	// A head its block doesn't hold.
+	missing := spendOf(3, chainhash.Hash{4})
+	missingBlock, err := c.GetBlockHash(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad := &State{
+		Category:    chainhash.Hash{5},
+		Links:       []Link{{Txid: missing.TxHash(), Height: 20, BlockHash: *missingBlock}},
+		ScannedTo:   20,
+		ScannedHash: *missingBlock,
+		Status:      StatusSearching,
+	}
+
+	if err := NewSPVBackend(c, nil).Advance(context.Background(), []*State{good, bad}, noSave, nil); err != nil {
+		t.Fatalf("a head that can't be read held up every token: %v", err)
+	}
+	if good.Head() == nil || good.Head().Txid != next.TxHash() || good.Status != StatusVerified || good.ScannedTo != 100 {
+		t.Fatalf("the other token didn't move on: %+v", good)
+	}
+	if len(bad.Links) != 1 || bad.Head().Txid != missing.TxHash() || bad.Status != StatusSearching || bad.ScannedTo != 20 {
+		t.Fatalf("the token at the head that can't be read changed: %+v", bad)
+	}
 }
 
 // TestSPVScriptFiltersGenesisBelowRange ensures that on script filters a search

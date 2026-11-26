@@ -384,7 +384,7 @@ func TestPassBlocksLetGo(t *testing.T) {
 	}
 	blocks := newPassBlocks(c, []*chainbcmr.Hint{{HeadHeight: 10}, {HeadHeight: 10}})
 	for i, tx := range []*wire.MsgTx{first, second} {
-		if _, err := blocks.readLink(context.Background(), tx.TxHash(), 10, hash); err != nil {
+		if _, _, err := blocks.readLink(context.Background(), tx.TxHash(), 10, hash); err != nil {
 			t.Fatal(err)
 		}
 		blocks.release(10)

@@ -104,16 +104,28 @@ type SPVBackend struct {
 	waiting     map[chainhash.Hash]time.Time
 	searchTried map[chainhash.Hash]retry
 
-	// scripts holds the locking script of output 0 of the transactions seen as
-	// links, which a search for its spend on script filters needs.
-	scripts map[chainhash.Hash][]byte
+	// On script filters, heads holds the head each token followed is at, by
+	// category, and scripts the locking script of output 0 of those heads, by
+	// transaction, which a search for the head's spend there needs.  A script
+	// goes once no token is at its head: when they moved on, burned, left the
+	// chain, aren't followed any more or were forgotten.
+	heads   map[chainhash.Hash]chainhash.Hash
+	scripts map[chainhash.Hash]*headScript
+}
+
+// headScript is the locking script of output 0 of a head, and the number of
+// tokens at that head.
+type headScript struct {
+	script []byte
+	tokens int
 }
 
 // NewSPVBackend returns a backend.  Hints can be nil on a network without a
 // table, where a search goes down to the first block.
 func NewSPVBackend(source spvSource, hints *chainbcmr.Hints) *SPVBackend {
 	return &SPVBackend{source: source, hints: hints, waiting: make(map[chainhash.Hash]time.Time),
-		searchTried: make(map[chainhash.Hash]retry), scripts: make(map[chainhash.Hash][]byte)}
+		searchTried: make(map[chainhash.Hash]retry), heads: make(map[chainhash.Hash]chainhash.Hash),
+		scripts: make(map[chainhash.Hash]*headScript)}
 }
 
 // floor returns the height no walk or search for a genesis goes below or to.
@@ -199,7 +211,6 @@ func (b *SPVBackend) Prepare(ctx context.Context, states []*State) error {
 		hints[i] = &starts[i].hint
 	}
 	blocks := newPassBlocks(b.source, hints)
-	blocks.remember = b.rememberScript
 	for _, start := range starts {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -249,7 +260,7 @@ func (b *SPVBackend) startFromHint(ctx context.Context, blocks *passBlocks, stat
 	if err != nil {
 		return err
 	}
-	head, err := blocks.readLink(ctx, hint.Head, hint.HeadHeight, hash)
+	head, headTx, err := blocks.readLink(ctx, hint.Head, hint.HeadHeight, hash)
 	if err != nil {
 		return err
 	}
@@ -263,13 +274,16 @@ func (b *SPVBackend) startFromHint(ctx context.Context, blocks *passBlocks, stat
 		if err != nil {
 			return err
 		}
-		older, err = blocks.readLink(ctx, hint.Publication.Txid, hint.Publication.Height, pubHash)
+		older, _, err = blocks.readLink(ctx, hint.Publication.Txid, hint.Publication.Height, pubHash)
 		if err != nil {
 			return err
 		}
 	}
 
 	state.Links = []Link{*head}
+	if !hint.Burned {
+		b.keepHead(state.Category, headTx)
+	}
 	state.Burned = hint.Burned
 	state.ScannedTo, state.ScannedHash = b.hints.Height, *scanned
 	state.Status = StatusSearching
@@ -285,10 +299,6 @@ type passBlocks struct {
 	source spvSource
 	uses   map[int32]int
 	blocks map[int32]passBlock
-
-	// remember, when it isn't nil, is told of a transaction a link is read
-	// from, so the script of its output 0 can be kept.
-	remember func(*wire.MsgTx)
 }
 
 // passBlock is a block a pass read, with its hash, as a block at a height that
@@ -320,16 +330,17 @@ func (p *passBlocks) release(height int32) {
 }
 
 // readLink reads a transaction from its block, with its publication, keeping the
-// block while starts that were counted for it are left.
+// block while starts that were counted for it are left.  It returns the
+// transaction too.
 func (p *passBlocks) readLink(ctx context.Context, txid chainhash.Hash, height int32,
-	hash *chainhash.Hash) (*Link, error) {
+	hash *chainhash.Hash) (*Link, *wire.MsgTx, error) {
 
 	kept, ok := p.blocks[height]
 	block := kept.block
 	if !ok || kept.hash != *hash {
 		var err error
 		if block, err = p.source.GetBlock(hash, ctx.Done()); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if p.uses[height] > 0 {
 			p.blocks[height] = passBlock{*hash, block}
@@ -337,13 +348,10 @@ func (p *passBlocks) readLink(ctx context.Context, txid chainhash.Hash, height i
 	}
 	for _, tx := range block.Transactions {
 		if tx.TxHash() == txid {
-			if p.remember != nil {
-				p.remember(tx)
-			}
-			return newLink(tx, height, *hash), nil
+			return newLink(tx, height, *hash), tx, nil
 		}
 	}
-	return nil, fmt.Errorf("transaction %v isn't in block %v", txid, hash)
+	return nil, nil, fmt.Errorf("transaction %v isn't in block %v", txid, hash)
 }
 
 // newLink returns the link of a transaction.
@@ -355,29 +363,116 @@ func newLink(tx *wire.MsgTx, height int32, blockHash chainhash.Hash) *Link {
 	return link
 }
 
-// rememberScript keeps the locking script of output 0 of a transaction seen as
-// a link. Regular filters match a spend by the outpoint, so they keep none.
-func (b *SPVBackend) rememberScript(tx *wire.MsgTx) {
+// keepHead keeps, on script filters, that the token of the category is at the
+// head tx, with the locking script of the head's output 0, which a search for
+// its spend there needs.  Regular filters match a spend by the outpoint, so
+// nothing is kept for them.
+func (b *SPVBackend) keepHead(category chainhash.Hash, tx *wire.MsgTx) {
 	if !b.source.ScriptFilters() || len(tx.TxOut) == 0 {
 		return
 	}
-	b.scripts[tx.TxHash()] = tx.TxOut[0].PkScript
+	b.atHead(category, tx.TxHash(), tx.TxOut[0].PkScript)
 }
 
-// scriptOf returns the locking script of output 0 of the transaction the
-// outpoint spends. The outpoint's hash is the transaction's, as an authchain
-// link is always that output. A script already seen is returned as it was
-// kept. Otherwise, when blockHash isn't nil, that block is read and the script
-// kept. It fails when that transaction isn't in the block or has no output.
-func (b *SPVBackend) scriptOf(ctx context.Context, outpoint wire.OutPoint,
-	blockHash *chainhash.Hash) ([]byte, error) {
-	if script, ok := b.scripts[outpoint.Hash]; ok {
-		return script, nil
+// atHead keeps that the token of the category is at the head txid, whose
+// output 0 has the script, and lets go of the head it was at before.
+func (b *SPVBackend) atHead(category, txid chainhash.Hash, script []byte) {
+	if at, ok := b.heads[category]; ok {
+		if at == txid {
+			return
+		}
+		b.dropHead(category)
 	}
-	if blockHash == nil {
-		return nil, fmt.Errorf("the script of %v isn't known", outpoint.Hash)
+	b.heads[category] = txid
+	kept, ok := b.scripts[txid]
+	if !ok {
+		kept = &headScript{script: script}
+		b.scripts[txid] = kept
 	}
-	block, err := b.source.GetBlock(blockHash, ctx.Done())
+	kept.tokens++
+}
+
+// dropHead lets go of the head the token of the category is at, whose script
+// goes once no token is at it.
+func (b *SPVBackend) dropHead(category chainhash.Hash) {
+	txid, ok := b.heads[category]
+	if !ok {
+		return
+	}
+	delete(b.heads, category)
+	if kept := b.scripts[txid]; kept != nil {
+		if kept.tokens--; kept.tokens <= 0 {
+			delete(b.scripts, txid)
+		}
+	}
+}
+
+// dropUnfollowedHeads lets go of the heads that the tokens watched aren't at:
+// those of the tokens that burned, failed or aren't asked about any more, and
+// those that a reorganization took a token back from.
+func (b *SPVBackend) dropUnfollowedHeads(watching map[wire.OutPoint][]*State) {
+	if len(b.heads) == 0 {
+		return
+	}
+	followed := make(map[chainhash.Hash]chainhash.Hash)
+	for outpoint, followers := range watching {
+		for _, state := range followers {
+			followed[state.Category] = outpoint.Hash
+		}
+	}
+	for category, txid := range b.heads {
+		if at, ok := followed[category]; !ok || at != txid {
+			b.dropHead(category)
+		}
+	}
+}
+
+// headInputs returns the heads that a search on script filters looks for the
+// spends of, each with the locking script of its output 0.  A script that isn't
+// kept is read from the head's block.  A head whose script can't be read is
+// left out of watching with a warning, so that the tokens at the other heads
+// move on, and those at it try again at the next pass.  An OP_RETURN output
+// can't be spent and is left out of the inputs.  So is one with an empty
+// script: anyone can spend it, so the link after it is no longer its
+// publisher's alone, and no script filter holds its spend.  On script filters
+// a token stays at such a link, where on regular filters it is followed on.
+func (b *SPVBackend) headInputs(ctx context.Context, watching map[wire.OutPoint][]*State) []ScriptOutPoint {
+	inputs := make([]ScriptOutPoint, 0, len(watching))
+	for outpoint, followers := range watching {
+		script, err := b.headScriptOf(ctx, outpoint, followers)
+		if err != nil {
+			log.Warnf("Unable to look for a spend of %v, the authchain head of token %v: %v",
+				outpoint, followers[0].Category, err)
+			delete(watching, outpoint)
+			continue
+		}
+		if notInScriptFilters(script) {
+			if len(script) == 0 {
+				log.Debugf("The authchain link %v isn't followed on script "+
+					"filters: its output has an empty script", outpoint)
+			}
+			continue
+		}
+		inputs = append(inputs, ScriptOutPoint{OutPoint: outpoint, PkScript: script})
+	}
+	return inputs
+}
+
+// headScriptOf returns the locking script of output 0 of the head that the
+// followers are at, which an authchain link always is, as kept or else read
+// from the head's block, and keeps it for each of them.  It fails when the
+// block can't be read, or the head isn't in it or has no output.
+func (b *SPVBackend) headScriptOf(ctx context.Context, outpoint wire.OutPoint,
+	followers []*State) ([]byte, error) {
+
+	if kept, ok := b.scripts[outpoint.Hash]; ok {
+		for _, state := range followers {
+			b.atHead(state.Category, outpoint.Hash, kept.script)
+		}
+		return kept.script, nil
+	}
+	blockHash := followers[0].Head().BlockHash
+	block, err := b.source.GetBlock(&blockHash, ctx.Done())
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +483,9 @@ func (b *SPVBackend) scriptOf(ctx context.Context, outpoint wire.OutPoint,
 		if len(tx.TxOut) == 0 {
 			return nil, fmt.Errorf("transaction %v has no output", outpoint.Hash)
 		}
-		b.rememberScript(tx)
+		for _, state := range followers {
+			b.keepHead(state.Category, tx)
+		}
 		return tx.TxOut[0].PkScript, nil
 	}
 	return nil, fmt.Errorf("transaction %v isn't in block %v", outpoint.Hash, blockHash)
@@ -521,54 +618,31 @@ func (b *SPVBackend) blockGenesis(ctx context.Context, blockHash, category chain
 }
 
 // searchLinkSpends searches for the spends of authchain links. On regular
-// filters that is a search for the outpoints. On script filters each outpoint
-// is matched by the locking script of its output. blocks gives the block of an
-// outpoint whose transaction isn't remembered, so that script can be read.
-// An OP_RETURN output can't be spent and is left out.  So is one with an empty
-// script: anyone can spend it, so the link after it is no longer its
-// publisher's alone, and no script filter holds its spend.  On script filters
-// a token stays at such a link, where on regular filters it is followed on.
+// filters that is a search for the outpoints. On script filters it is one for
+// the inputs, which headInputs gives, each matched by the locking script of its
+// output.  The links that found moves the tokens on to are watched with the
+// scripts kept for them, unless no script filter can hold their spends, as
+// headInputs leaves those out too.
 func (b *SPVBackend) searchLinkSpends(ctx context.Context, outpoints []wire.OutPoint,
-	blocks map[wire.OutPoint]chainhash.Hash, from, to int32,
+	inputs []ScriptOutPoint, from, to int32,
 	found func(SpendFound) []wire.OutPoint, progress func(height int32)) (int32, error) {
 
 	if !b.source.ScriptFilters() {
 		return b.source.SearchSpends(outpoints, from, to, found, progress, ctx.Done())
 	}
-	inputs := make([]ScriptOutPoint, 0, len(outpoints))
-	for _, outpoint := range outpoints {
-		var blockHash *chainhash.Hash
-		if hash, ok := blocks[outpoint]; ok {
-			blockHash = &hash
-		}
-		script, err := b.scriptOf(ctx, outpoint, blockHash)
-		if err != nil {
-			return searchMissed(from, to), err
-		}
-		if notInScriptFilters(script) {
-			if len(script) == 0 {
-				log.Debugf("The authchain link %v isn't followed on script "+
-					"filters: its output has an empty script", outpoint)
-			}
-			continue
-		}
-		inputs = append(inputs, ScriptOutPoint{OutPoint: outpoint, PkScript: script})
-	}
 	return b.source.SearchScriptSpends(inputs, from, to, func(spend SpendFound) []ScriptOutPoint {
-		// The next link is usually output 0 of this transaction.  The
-		// script of the output it spends isn't needed again: after a
-		// reorganization it is read from the head's block.
-		b.rememberScript(spend.Tx)
-		delete(b.scripts, spend.OutPoint.Hash)
 		next := found(spend)
 		watched := make([]ScriptOutPoint, 0, len(next))
 		for _, outpoint := range next {
-			script, err := b.scriptOf(ctx, outpoint, nil)
-			if err != nil {
+			kept, ok := b.scripts[outpoint.Hash]
+			if !ok {
 				log.Warnf("Unable to look for a spend of %v: the script of its output isn't known", outpoint)
 				continue
 			}
-			watched = append(watched, ScriptOutPoint{OutPoint: outpoint, PkScript: script})
+			if notInScriptFilters(kept.script) {
+				continue
+			}
+			watched = append(watched, ScriptOutPoint{OutPoint: outpoint, PkScript: kept.script})
 		}
 		return watched
 	}, progress, ctx.Done())
@@ -644,14 +718,16 @@ func (b *SPVBackend) genesisFinder(ctx context.Context, states []*State,
 			unknown[state.Category] = struct{}{}
 			return nil
 		}
-		b.rememberScript(spend.Tx)
 		state.Links = []Link{*newLink(spend.Tx, spend.Height, spend.BlockHash)}
 		delete(b.waiting, state.Category)
 		state.Burned = chainbcmr.IsBurn(spend.Tx)
+		if !state.Burned {
+			b.keepHead(state.Category, spend.Tx)
+		}
 		state.ScannedTo, state.ScannedHash = spend.Height-1, *before
 		state.Status = StatusSearching
 		state.AuthbaseScripts, state.GenesisHeight = nil, spend.Height
-		state.AuthbaseSearched = keepAuthbase(b, state, block, spend)
+		state.AuthbaseSearched = keepAuthbase(state, block, spend)
 		if !state.AuthbaseSearched {
 			state.AuthbaseScripts = authbaseScripts(spend.Tx, state.Category)
 			state.AuthbaseSearched = len(state.AuthbaseScripts) == 0
@@ -662,12 +738,11 @@ func (b *SPVBackend) genesisFinder(ctx context.Context, states []*State,
 
 // keepAuthbase keeps a publication on the authbase, if it's in the block of the
 // genesis, and returns whether it's there.  Some tokens publish only there.
-func keepAuthbase(b *SPVBackend, state *State, block *wire.MsgBlock, spend SpendFound) bool {
+func keepAuthbase(state *State, block *wire.MsgBlock, spend SpendFound) bool {
 	for _, tx := range block.Transactions {
 		if tx.TxHash() != state.Category {
 			continue
 		}
-		b.rememberScript(tx)
 		if link := newLink(tx, spend.Height, spend.BlockHash); link.Publication != nil {
 			state.Older = link.Publication
 		}
@@ -772,10 +847,11 @@ func (b *SPVBackend) searchNewBlocks(ctx context.Context, states []*State, tip i
 }
 
 // Forget has a token that waits try again at the next cycle, as asking for it
-// does, its authbase search too.
+// does, its authbase search too, and lets go of its head.
 func (b *SPVBackend) Forget(category chainhash.Hash) {
 	delete(b.waiting, category)
 	delete(b.searchTried, category)
+	b.dropHead(category)
 }
 
 // Advance checks each state against the chain, then follows every head that can
@@ -818,6 +894,20 @@ func (b *SPVBackend) Advance(ctx context.Context, states []*State, save func(*St
 		watching[outpoint] = append(watching[outpoint], state)
 		from = min(from, state.ScannedTo+1)
 	}
+	b.dropUnfollowedHeads(watching)
+
+	// On script filters a head whose script can't be read holds up only the
+	// tokens at it, which are left out of this pass.
+	var inputs []ScriptOutPoint
+	if from <= tip && b.source.ScriptFilters() {
+		inputs = b.headInputs(ctx, watching)
+		from = tip + 1
+		for _, followers := range watching {
+			for _, state := range followers {
+				from = min(from, state.ScannedTo+1)
+			}
+		}
+	}
 	if len(watching) == 0 {
 		return b.searchAuthbases(ctx, states, save)
 	}
@@ -828,11 +918,8 @@ func (b *SPVBackend) Advance(ctx context.Context, states []*State, save func(*St
 	}
 	if from <= tip {
 		outpoints := make([]wire.OutPoint, 0, len(watching))
-		// blocks is the block of each head, for a script that isn't remembered.
-		blocks := make(map[wire.OutPoint]chainhash.Hash, len(watching))
-		for outpoint, followers := range watching {
+		for outpoint := range watching {
 			outpoints = append(outpoints, outpoint)
-			blocks[outpoint] = followers[0].Head().BlockHash
 		}
 		lastSave := from
 
@@ -853,7 +940,6 @@ func (b *SPVBackend) Advance(ctx context.Context, states []*State, save func(*St
 			followers := watching[spend.OutPoint]
 			delete(watching, spend.OutPoint)
 			for {
-				b.rememberScript(spend.Tx)
 				link := newLink(spend.Tx, spend.Height, spend.BlockHash)
 				burned := chainbcmr.IsBurn(spend.Tx)
 				for _, state := range followers {
@@ -861,8 +947,11 @@ func (b *SPVBackend) Advance(ctx context.Context, states []*State, save func(*St
 					state.trimLinks()
 					state.Burned = burned
 					if burned {
+						b.dropHead(state.Category)
 						state.ScannedTo, state.ScannedHash = spend.Height, spend.BlockHash
 						save(state)
+					} else {
+						b.keepHead(state.Category, spend.Tx)
 					}
 				}
 				if burned {
@@ -891,7 +980,7 @@ func (b *SPVBackend) Advance(ctx context.Context, states []*State, save func(*St
 				log.Warnf("Unable to save a token search: %v", err)
 			}
 		}
-		reached, err := b.searchLinkSpends(ctx, outpoints, blocks, from, tip, follow, progress)
+		reached, err := b.searchLinkSpends(ctx, outpoints, inputs, from, tip, follow, progress)
 		if err != nil {
 			// What was scanned stays scanned, and a failure to keep it
 			// only costs scanning it again.
@@ -988,7 +1077,6 @@ func (b *SPVBackend) searchAuthbaseWeeks(ctx context.Context, group []*State, fr
 		if weekFrom, weekTo := authbaseWeek(state); found.Height > weekFrom || found.Height < weekTo {
 			return true
 		}
-		b.rememberScript(found.Tx)
 		if link := newLink(found.Tx, found.Height, found.BlockHash); link.Publication != nil {
 			state.Older = link.Publication
 		}
