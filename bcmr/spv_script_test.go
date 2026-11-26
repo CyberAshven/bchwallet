@@ -548,6 +548,34 @@ func TestSPVScriptFiltersUnreadableHeadSkipped(t *testing.T) {
 	}
 }
 
+// TestSPVScriptFiltersNoSearchWithoutInputs ensures that on script filters a
+// pass whose heads no script filter can hold asks for no spend search.
+func TestSPVScriptFiltersNoSearchWithoutInputs(t *testing.T) {
+	c := withScriptFilters(newFakeChain(100))
+	head := spendOf(1, chainhash.Hash{2})
+	head.TxOut[0].PkScript = nil
+	c.put(10, head)
+	hash, err := c.GetBlockHash(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := &State{
+		Category:    chainhash.Hash{1},
+		Links:       []Link{{Txid: head.TxHash(), Height: 10, BlockHash: *hash}},
+		ScannedTo:   10,
+		ScannedHash: *hash,
+	}
+	if err := NewSPVBackend(c, nil).Advance(context.Background(), []*State{state}, noSave, nil); err != nil {
+		t.Fatal(err)
+	}
+	if scriptSpendCalls[c] != 0 {
+		t.Fatalf("%d spend searches with no script to match", scriptSpendCalls[c])
+	}
+	if len(state.Links) != 1 || state.Status != StatusVerified || state.ScannedTo != 100 {
+		t.Fatalf("%+v", state)
+	}
+}
+
 // TestSPVScriptFiltersGenesisBelowRange ensures that on script filters a search
 // for a genesis over a range that starts above it stops at the first block that
 // creates an output of the category, which holds only transfers, rather than

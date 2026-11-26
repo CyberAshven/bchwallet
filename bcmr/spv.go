@@ -620,15 +620,18 @@ func (b *SPVBackend) blockGenesis(ctx context.Context, blockHash, category chain
 // searchLinkSpends searches for the spends of authchain links. On regular
 // filters that is a search for the outpoints. On script filters it is one for
 // the inputs, which headInputs gives, each matched by the locking script of its
-// output.  The links that found moves the tokens on to are watched with the
-// scripts kept for them, unless no script filter can hold their spends, as
-// headInputs leaves those out too.
+// output, and with none there is nothing to search for.  The links that found
+// moves the tokens on to are watched with the scripts kept for them, unless no
+// script filter can hold their spends, as headInputs leaves those out too.
 func (b *SPVBackend) searchLinkSpends(ctx context.Context, outpoints []wire.OutPoint,
 	inputs []ScriptOutPoint, from, to int32,
 	found func(SpendFound) []wire.OutPoint, progress func(height int32)) (int32, error) {
 
 	if !b.source.ScriptFilters() {
 		return b.source.SearchSpends(outpoints, from, to, found, progress, ctx.Done())
+	}
+	if len(inputs) == 0 {
+		return searchMissed(from, to), nil
 	}
 	return b.source.SearchScriptSpends(inputs, from, to, func(spend SpendFound) []ScriptOutPoint {
 		next := found(spend)
