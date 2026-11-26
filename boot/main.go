@@ -496,6 +496,11 @@ func startNeutrino() (*chain.NeutrinoClient, func(), error) {
 	if cfg.ScriptFilters {
 		filterType = wire.GCSFilterScripts
 	}
+	if err := chain.RemoveOtherFilterHeaders(netDir, filterType); err != nil {
+		_ = spvdb.Close()
+		return nil, nil, fmt.Errorf("unable to remove the filter "+
+			"headers of the other filter type: %v", err)
+	}
 	chainService, err := neutrino.NewChainService(
 		neutrino.Config{
 			DataDir:        netDir,

@@ -386,3 +386,118 @@ func TestScriptFiltersBareMultisigSpend(t *testing.T) {
 		}
 	}
 }
+
+// TestSwitchFilterTypes checks, against a node, that a neutrino data
+// directory syncs regular filters, then script filters, then regular and
+// script filters again, as a wallet does whose --scriptfilters is turned on
+// and off.  While it syncs script filters, a reorg disconnects the block that
+// the regular filter headers end at.  A chain service rolls back only the
+// filter headers of the type it syncs, and the rollback of the block headers
+// removes the disconnected blocks from the index that the header stores
+// share, so a chain service couldn't open those regular filter headers again,
+// unless RemoveOtherFilterHeaders removed them first.
+func TestSwitchFilterTypes(t *testing.T) {
+	node, err := rpctest.New(&chaincfg.SimNetParams, nil, nil)
+	if err != nil {
+		t.Fatalf("unable to create harness: %v", err)
+	}
+	defer func() { _ = node.TearDown() }()
+	if err := node.SetUp(false, 0); err != nil {
+		t.Fatalf("unable to set up harness: %v", err)
+	}
+	if _, err := node.Node.Generate(10); err != nil {
+		t.Fatalf("unable to mine: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	db, err := walletdb.Create("bdb", filepath.Join(dataDir, "neutrino.db"), true)
+	if err != nil {
+		t.Fatalf("unable to create db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// synced waits until the chain service has the filter headers of the
+	// node's whole chain, and they are the node's.
+	synced := func(svc *neutrino.ChainService) {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Minute)
+		for {
+			best, _, err := node.Node.GetBestBlock()
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := node.Node.GetCFilterHeader(best, svc.FilterType())
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := svc.FilterHeaders().FetchHeader(best)
+			if err == nil && *got == want.PrevFilterHeader {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("timed out waiting for the filter headers "+
+					"of filter type %v", svc.FilterType())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	// run starts a client on a chain service that syncs the filter type, as
+	// the wallet's SPV backend starts, and waits until it is synced, then
+	// until it is synced again after during, when that isn't nil.
+	run := func(filterType wire.FilterType, during func()) {
+		t.Helper()
+		if err := RemoveOtherFilterHeaders(dataDir, filterType); err != nil {
+			t.Fatalf("unable to remove the other filter headers: %v", err)
+		}
+		svc, err := neutrino.NewChainService(neutrino.Config{
+			DataDir:      dataDir,
+			Database:     db,
+			ChainParams:  chaincfg.SimNetParams,
+			ConnectPeers: []string{node.P2PAddress()},
+			FilterType:   filterType,
+		})
+		if err != nil {
+			t.Fatalf("unable to create a ChainService syncing filter "+
+				"type %v: %v", filterType, err)
+		}
+		client := NewNeutrinoClient(&chaincfg.SimNetParams, svc)
+		if err := client.Start(); err != nil {
+			t.Fatalf("unable to start the client: %v", err)
+		}
+		defer func() {
+			client.Stop()
+			client.WaitForShutdown()
+			if err := svc.Stop(); err != nil {
+				t.Fatalf("unable to stop the ChainService: %v", err)
+			}
+		}()
+		synced(svc)
+		if during != nil {
+			during()
+			synced(svc)
+		}
+	}
+
+	run(wire.GCSFilterRegular, nil)
+	run(wire.GCSFilterScripts, func() {
+		// Replace the two blocks at the tip, where the regular filter
+		// headers end, with three others.
+		_, tip, err := node.Node.GetBestBlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		hash, err := node.Node.GetBlockHash(int64(tip - 1))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := node.Node.InvalidateBlock(hash); err != nil {
+			t.Fatalf("unable to invalidate block %v: %v", hash, err)
+		}
+		if _, err := node.Node.Generate(3); err != nil {
+			t.Fatalf("unable to mine: %v", err)
+		}
+	})
+	run(wire.GCSFilterRegular, nil)
+	run(wire.GCSFilterScripts, nil)
+}
