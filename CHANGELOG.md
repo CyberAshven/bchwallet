@@ -62,6 +62,11 @@ This release keeps the wallet from spending an output again that a transaction i
 - `SweepAccount` leaves out coinbase outputs that haven't matured, and `FundTransaction` leaves them out unless `include_immature_coinbases` is set. The network rejects a transaction that spends one, so a sweep that included one failed, and `FundTransaction` returned them whatever the field said.
 - `SignTransaction` counts the tokens that a transaction sends to an output that can't be spent, such as an OP_RETURN output, as burned, so it refuses to sign one that sends the wallet's tokens there unless `allow_token_burn` is set. It counted them as kept, and signed such a transaction, which burned the tokens.
 
+### Upgrade notes
+
+- `chain.Interface`'s `Rescan` takes the outpoints to watch as a `map[wire.OutPoint]chain.WatchedOutput`, which gives the locking script of each output with the address the wallet keeps it under, as a script filter matches the spend of an output by its script, which the address of a bare multisig output doesn't give. Implementations of `chain.Interface` outside this repository need the new signature. `FilterBlocksRequest.WatchedOutPoints`, `FilterBlocksResponse.FoundOutPoints`, the `BlockFilterer` fields of the same names, `WatchIndex.OutPoints` and `wallet.RecoveryState.WatchedOutPoints` have that type too, `WatchIndex.AddOutPoint` takes the output's script, and `BitcoindClient.LoadTxFilter` takes a `map[wire.OutPoint]chain.WatchedOutput` where it took a `map[wire.OutPoint]bchutil.Address`.
+- `chain.RemoveOtherFilterHeaders` removes the filter headers of the filter types a neutrino chain service won't sync from its data directory, and is to be called before the service opens it.
+
 ## 0.13.2 (2026-10-27)
 
 This release moves to bchd 0.22.4, lets an app run the wallet again in the same process and start it when targeting current Android, lets the wallet hold and send CashTokens and shows them in the gRPC API, pays BitPay invoices with the JSON Payment Protocol, makes SPV wallets reconnect to their peer after a restart or a network change, and adds testnet4 and chipnet.
