@@ -181,6 +181,7 @@ func (s *NeutrinoClient) Stop() {
 	}
 	close(s.quit)
 	s.started = false
+	s.mempoolAsks.stop()
 }
 
 // WaitForShutdown replicates the RPC client's WaitForShutdown method.
@@ -819,6 +820,22 @@ func (m *mempoolAsker) request(addrs []bchutil.Address) {
 	m.timer = time.AfterFunc(m.gap, m.askPending)
 	m.mtx.Unlock()
 	m.ask(addrs)
+}
+
+// stop drops the addresses that wait for the end of a gap, and the gap, so that
+// nothing is asked for once the client has stopped.  A client made without
+// NewNeutrinoClient has no asker.
+func (m *mempoolAsker) stop() {
+	if m == nil {
+		return
+	}
+	m.mtx.Lock()
+	defer m.mtx.Unlock()
+	if m.timer != nil {
+		m.timer.Stop()
+		m.timer = nil
+	}
+	m.pending = nil
 }
 
 // askPending asks for the addresses that waited, if any, which starts another

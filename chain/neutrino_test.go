@@ -219,3 +219,25 @@ func TestMempoolAskerMerges(t *testing.T) {
 			"any asked for at once", asked)
 	}
 }
+
+// TestMempoolAskerStop checks that the addresses that wait for the end of a
+// gap aren't asked for once the asker has stopped, as the client stops it.
+func TestMempoolAskerStop(t *testing.T) {
+	asked := make(chan []bchutil.Address, 2)
+	m := &mempoolAsker{gap: 20 * time.Millisecond, ask: func(addrs []bchutil.Address) {
+		asked <- addrs
+	}}
+	addr, err := bchutil.NewAddressPubKeyHash(make([]byte, 20), &chaincfg.SimNetParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.request([]bchutil.Address{addr})
+	m.request([]bchutil.Address{addr})
+	<-asked
+	m.stop()
+	select {
+	case addrs := <-asked:
+		t.Fatalf("asked for %v after the asker stopped", addrs)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
