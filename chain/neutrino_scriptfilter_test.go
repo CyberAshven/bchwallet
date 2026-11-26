@@ -412,7 +412,9 @@ func waitNotification(t *testing.T, client *NeutrinoClient, timeout time.Duratio
 // NotifyReceived after it, ask for the filter of the whole mempool before
 // this payment is sent, so that snapshot does not hold the payment.  The
 // transaction can only have come from the script filter of a mempool
-// interval that closed after the payment was admitted.
+// interval that closed after the payment was admitted.  The rescan starts at
+// the tip while the chain service's block notifications are still behind it,
+// and must follow the chain on all the same, to the payment's block.
 func TestNotifyReceivedScriptFiltersMempool(t *testing.T) {
 	node, err := rpctest.New(&chaincfg.SimNetParams, nil, []string{"--txindex"})
 	if err != nil {
@@ -475,7 +477,9 @@ func TestNotifyReceivedScriptFiltersMempool(t *testing.T) {
 	// Rescan from the node's tip is what asks for the mempool.  The client
 	// has to store that header first, or the rescan fails.  A rescan
 	// started while the chain service's best block is still genesis
-	// reports itself finished before the client is current.
+	// reports itself finished before the client is current.  The store is
+	// looked at often, so that the rescan starts while the chain service
+	// still notifies the blocks of the filter headers it just stored.
 	deadline := time.Now().Add(2 * time.Minute)
 	for {
 		if _, err := svc.FilterHeaders().FetchHeader(bestHash); err == nil {
@@ -484,32 +488,22 @@ func TestNotifyReceivedScriptFiltersMempool(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for the script filter headers")
 		}
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 
-	// The chain service stores a filter header a moment before it takes it
-	// for its tip, and a rescan from the tip that starts in between ends
-	// with an error, which NotifyReceived then returns.  The rescan is
-	// started again until the client takes the new address.
-	deadline = time.Now().Add(time.Minute)
-	for {
-		if err := client.Rescan(bestHash, []bchutil.Address{first}, nil); err != nil {
-			t.Fatalf("unable to rescan: %v", err)
-		}
-		waitNotification(t, client, 30*time.Second, "the rescan to finish",
-			func(n interface{}) bool {
-				_, ok := n.(*RescanFinished)
-				return ok
-			})
-
-		err := client.NotifyReceived([]bchutil.Address{second})
-		if err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("unable to watch the new address: %v", err)
-		}
-		time.Sleep(100 * time.Millisecond)
+	// The block notifications haven't reached the tip yet, so a rescan from
+	// it can't follow the chain from there at once.  It waits for them, and
+	// takes the new address, rather than end.
+	if err := client.Rescan(bestHash, []bchutil.Address{first}, nil); err != nil {
+		t.Fatalf("unable to rescan: %v", err)
+	}
+	waitNotification(t, client, 30*time.Second, "the rescan to finish",
+		func(n interface{}) bool {
+			_, ok := n.(*RescanFinished)
+			return ok
+		})
+	if err := client.NotifyReceived([]bchutil.Address{second}); err != nil {
+		t.Fatalf("unable to watch the new address: %v", err)
 	}
 
 	payment, err := node.CreateTransaction(
@@ -535,6 +529,25 @@ func TestNotifyReceivedScriptFiltersMempool(t *testing.T) {
 					"unconfirmed", payHash, tx.Block.Hash)
 			}
 			return true
+		})
+
+	// The rescan still follows the chain, and finds the payment's block by
+	// the address it took up.
+	if _, err := node.Node.Generate(1); err != nil {
+		t.Fatalf("unable to mine the payment: %v", err)
+	}
+	waitNotification(t, client, 30*time.Second, "the block with the payment",
+		func(n interface{}) bool {
+			connected, ok := n.(FilteredBlockConnected)
+			if !ok {
+				return false
+			}
+			for _, tx := range connected.RelevantTxs {
+				if tx.Hash == payHash {
+					return true
+				}
+			}
+			return false
 		})
 }
 

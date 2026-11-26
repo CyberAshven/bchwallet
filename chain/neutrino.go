@@ -23,6 +23,7 @@ import (
 	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/bchwallet/wtxmgr"
 	"github.com/gcash/neutrino"
+	"github.com/gcash/neutrino/blockntfns"
 )
 
 // NeutrinoClient is an implementation of the bchwalet chain.Interface interface.
@@ -555,6 +556,70 @@ func retryFetch(what string, fetch func() error, interrupt,
 	}
 }
 
+// subscribeRetryDelay is how long a rescan waits before it asks again to
+// follow the chain from a block that the chain service's block notifications
+// haven't reached yet.
+const subscribeRetryDelay = 50 * time.Millisecond
+
+// rescanSource is what a rescan reads the chain service through: a chain
+// source, which tells neutrino the type of the filters it syncs.
+type rescanSource interface {
+	neutrino.ChainSource
+	FilterType() wire.FilterType
+}
+
+// rescanChainSource is the chain service as the client's rescans read it.  The
+// chain service writes a batch of filter headers to their store, notifies
+// their blocks one at a time, and only then takes the last for the tip that it
+// hands out block subscriptions up to, while its best block is read from the
+// store.  A rescan that starts at the best block, or catches up with it, in
+// between, is refused its subscription and ends, after which the client no
+// longer follows the chain, and NotifyReceived can't add addresses to it.
+// Subscribe asks again, every subscribeRetryDelay, while the store holds the
+// block, until the notifications have reached it, or quit or stop is closed.
+type rescanChainSource struct {
+	rescanSource
+	quit, stop <-chan struct{}
+}
+
+// Subscribe returns a block subscription from bestHeight, as the chain
+// service's does, once the block notifications have reached that height.
+func (c *rescanChainSource) Subscribe(bestHeight uint32) (*blockntfns.Subscription, error) {
+	for {
+		sub, err := c.rescanSource.Subscribe(bestHeight)
+		if err == nil || errors.Is(err, blockntfns.ErrSubscriptionManagerStopped) {
+			return sub, err
+		}
+
+		// A block the store doesn't hold, as after a rollback of the
+		// filter headers, is the rescan's to wait for.
+		best, bestErr := c.BestBlock()
+		if bestErr != nil || best.Height < int32(bestHeight) {
+			return nil, err
+		}
+		log.Debugf("Waiting for the block notifications to reach height "+
+			"%d: %v", bestHeight, err)
+		select {
+		case <-time.After(subscribeRetryDelay):
+		case <-c.quit:
+			return nil, err
+		case <-c.stop:
+			return nil, err
+		}
+	}
+}
+
+// newRescanSource returns the chain source of a new rescan, which stops
+// waiting once the rescan or the client is told to quit.  The caller holds
+// clientMtx.
+func (s *NeutrinoClient) newRescanSource() *rescanChainSource {
+	return &rescanChainSource{
+		rescanSource: &neutrino.RescanChainSource{ChainService: s.CS},
+		quit:         s.rescanQuit,
+		stop:         s.quit,
+	}
+}
+
 // Rescan replicates the RPC client's Rescan command.
 func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []bchutil.Address,
 	outPoints map[wire.OutPoint]WatchedOutput) error {
@@ -663,9 +728,7 @@ func (s *NeutrinoClient) Rescan(startHash *chainhash.Hash, addrs []bchutil.Addre
 	}
 
 	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS,
-		},
+		s.newRescanSource(),
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnClientConnected:           nil,
 			OnFilteredBlockConnected:    s.onFilteredBlockConnected,
@@ -736,9 +799,7 @@ func (s *NeutrinoClient) NotifyReceived(addrs []bchutil.Address) error {
 
 	// Rescan with just the specified addresses.
 	newRescan := neutrino.NewRescan(
-		&neutrino.RescanChainSource{
-			ChainService: s.CS,
-		},
+		s.newRescanSource(),
 		neutrino.NotificationHandlers(rpcclient.NotificationHandlers{
 			OnFilteredBlockConnected:    s.onFilteredBlockConnected,
 			OnFilteredBlockDisconnected: s.onFilteredBlockDisconnected,

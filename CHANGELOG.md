@@ -52,6 +52,7 @@ This release keeps the wallet from spending an output again that a transaction i
 - A rescan that can't fetch or check a block waits twice as long before each retry, up to 30 seconds. It tried every 100 milliseconds, downloading a block that doesn't match its filter header ten times a second (latest neutrino).
 - After a reorg rolls back filter headers, a rescan that catches up with the chain is no longer handed blocks whose filter headers aren't synced yet (latest neutrino).
 - When the SPV client rolls its filter headers back below the blocks the wallet has synced, the wallet scans the blocks above the rollback again for used addresses at once, as at a start, and restarts its rescan from where that scan ends. The rescan rewound itself, but it watches only the unused addresses the wallet keeps past the last one used, where the scan for used addresses looks further, so after a restore whose scan ran on wrong filters, a payment to an address further on stayed unseen.
+- A rescan that starts at the tip, or catches up with it, while the SPV client notifies the blocks of filter headers it has just stored waits for the notifications to reach its block. It ended with "unable to register block subscription", after which the wallet no longer followed the chain until it restarted, and failed to watch the addresses it took up.
 
 ### RPC & gRPC
 

@@ -6,7 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gcash/bchd/wire"
+	"github.com/gcash/bchwallet/waddrmgr"
 	"github.com/gcash/neutrino"
+	"github.com/gcash/neutrino/blockntfns"
 )
 
 // TestRescanFailed checks that a rescan that stopped, as one does when a new
@@ -105,4 +108,66 @@ func TestForwardFilterRollbacks(t *testing.T) {
 		t.Fatal("the subscription wasn't ended once the client stopped")
 	}
 	s.wg.Wait()
+}
+
+// fakeRescanSource is a chain source that refuses the first refusals block
+// subscriptions, as the chain service refuses one while its block
+// notifications haven't reached the height asked for, and whose best block is
+// at best.
+type fakeRescanSource struct {
+	neutrino.ChainSource
+	refusals int
+	calls    int
+	best     int32
+}
+
+func (f *fakeRescanSource) FilterType() wire.FilterType {
+	return wire.GCSFilterScripts
+}
+
+func (f *fakeRescanSource) BestBlock() (*waddrmgr.BlockStamp, error) {
+	return &waddrmgr.BlockStamp{Height: f.best}, nil
+}
+
+func (f *fakeRescanSource) Subscribe(bestHeight uint32) (*blockntfns.Subscription, error) {
+	f.calls++
+	if f.calls <= f.refusals {
+		return nil, fmt.Errorf("request with height %d is greater than "+
+			"best height known 0", bestHeight)
+	}
+	return &blockntfns.Subscription{}, nil
+}
+
+// TestRescanSubscribeWaits checks that a rescan's block subscription is asked
+// for again while the chain service refuses it for a block whose filter header
+// it has stored, as it does until its block notifications reach the block,
+// rather than the refusal ending the rescan.  The refusal of a block the store
+// doesn't hold is returned, and so is one that comes once the rescan or the
+// client quits.
+func TestRescanSubscribeWaits(t *testing.T) {
+	source := &fakeRescanSource{refusals: 3, best: 110}
+	sub, err := (&rescanChainSource{rescanSource: source}).Subscribe(110)
+	if err != nil || sub == nil || source.calls != 4 {
+		t.Fatalf("a subscription refused 3 times gave %v, %v after %d "+
+			"calls, want it after 4", sub, err, source.calls)
+	}
+
+	source = &fakeRescanSource{refusals: 3, best: 109}
+	if _, err := (&rescanChainSource{rescanSource: source}).Subscribe(110); err == nil ||
+		source.calls != 1 {
+
+		t.Fatalf("a subscription above the best block gave %v after %d "+
+			"calls, want its refusal after 1", err, source.calls)
+	}
+
+	quit := make(chan struct{})
+	close(quit)
+	for _, c := range []*rescanChainSource{{quit: quit}, {stop: quit}} {
+		source = &fakeRescanSource{refusals: 3, best: 110}
+		c.rescanSource = source
+		if _, err := c.Subscribe(110); err == nil || source.calls != 1 {
+			t.Fatalf("a subscription after a quit gave %v after %d "+
+				"calls, want its refusal after 1", err, source.calls)
+		}
+	}
 }
